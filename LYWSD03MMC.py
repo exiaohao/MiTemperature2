@@ -2,9 +2,9 @@
 #!/home/openhabian/Python3/Python-3.7.4/python -u
 #-u to unbuffer output. Otherwise when calling with nohup or redirecting output things are printed very lately or would even mixup
 
-print("---------------------------------------------")
-print("MiTemperature2 / ATC Thermometer version 3.1")
-print("---------------------------------------------")
+# print("---------------------------------------------")
+# print("MiTemperature2 / ATC Thermometer version 3.1")
+# print("---------------------------------------------")
 
 from bluepy import btle
 import argparse
@@ -21,6 +21,10 @@ import logging
 import json
 import requests
 
+def submit_to_influxdb(data):
+	url = 'http://localhost:8086/write?db=collector'
+	q = requests.post(url, data=data)
+
 @dataclass
 class Measurement:
 	temperature: float
@@ -32,6 +36,10 @@ class Measurement:
 	sensorname: str	= ""
 	rssi: int = 0 
 
+	def to_json(self):
+		return json.dumps(self.__dict__)
+	def to_influx_raw(self):
+		return "env,sensor={sensor} t={temperature},h={humidity},b={battery} {ts}".format(sensor=self.sensorname.replace(':', ''), temperature=self.temperature, humidity=self.humidity, battery=self.voltage, ts=int(time.time() * 1000000000))
 	def __eq__(self, other): #rssi may be different, so exclude it from comparison
 		if self.temperature == other.temperature and self.humidity == other.humidity and self.calibratedHumidity == other.calibratedHumidity and self.battery == other.battery and self.sensorname == other.sensorname:
 			#in atc mode also exclude voltage as it changes often due to frequent measurements
@@ -239,40 +247,54 @@ class MyDelegate(btle.DefaultDelegate):
 				else:
 					temp=round(temp,1)
 			humidity=int.from_bytes(data[2:3],byteorder='little')
-			print("Temperature: " + str(temp))
-			print("Humidity: " + str(humidity))
 			voltage=int.from_bytes(data[3:5],byteorder='little') / 1000.
-			print("Battery voltage:",voltage,"V")
 			measurement.temperature = temp
 			measurement.humidity = humidity
 			measurement.voltage = voltage
 			measurement.sensorname = args.name
-			#if args.battery:
-				#measurement.battery = globalBatteryLevel
-			batteryLevel = min(int(round((voltage - 2.1),2) * 100), 100) #3.1 or above --> 100% 2.1 --> 0 %
-			measurement.battery = batteryLevel
-			print("Battery level:",batteryLevel)
+
+			if args.json is not None:
+				print(measurement.to_json())
+
+			elif args.influxraw is not None:
+				print(measurement.to_influx_raw())
+				submit_to_influxdb(measurement.to_influx_raw())
 				
-
-			if args.offset:
-				humidityCalibrated = humidity + args.offset
-				print("Calibrated humidity: " + str(humidityCalibrated))
-				measurement.calibratedHumidity = humidityCalibrated
-
-			if args.TwoPointCalibration:
-				humidityCalibrated= calibrateHumidity2Points(humidity,args.offset1,args.offset2, args.calpoint1, args.calpoint2)
-				print("Calibrated humidity: " + str(humidityCalibrated))
-				measurement.calibratedHumidity = humidityCalibrated
-
-			if args.callback or args.httpcallback:
-				measurements.append(measurement)
-
-			if(args.mqttconfigfile):
-				if measurement.calibratedHumidity == 0:
-					measurement.calibratedHumidity = measurement.humidity
-				jsonString=buildJSONString(measurement)
-				myMQTTPublish(MQTTTopic,jsonString)
-				#MQTTClient.publish(MQTTTopic,jsonString,1)
+			else:	
+				print("Temperature: " + str(temp))
+				print("Humidity: " + str(humidity))
+				# voltage=int.from_bytes(data[3:5],byteorder='little') / 1000.
+				print("Battery voltage:",voltage,"V")
+				measurement.temperature = temp
+				measurement.humidity = humidity
+				measurement.voltage = voltage
+				measurement.sensorname = args.name
+				#if args.battery:
+					#measurement.battery = globalBatteryLevel
+				batteryLevel = min(int(round((voltage - 2.1),2) * 100), 100) #3.1 or above --> 100% 2.1 --> 0 %
+				measurement.battery = batteryLevel
+				print("Battery level:",batteryLevel)
+					
+	
+				if args.offset:
+					humidityCalibrated = humidity + args.offset
+					print("Calibrated humidity: " + str(humidityCalibrated))
+					measurement.calibratedHumidity = humidityCalibrated
+	
+				if args.TwoPointCalibration:
+					humidityCalibrated= calibrateHumidity2Points(humidity,args.offset1,args.offset2, args.calpoint1, args.calpoint2)
+					print("Calibrated humidity: " + str(humidityCalibrated))
+					measurement.calibratedHumidity = humidityCalibrated
+	
+				if args.callback or args.httpcallback:
+					measurements.append(measurement)
+	
+				if(args.mqttconfigfile):
+					if measurement.calibratedHumidity == 0:
+						measurement.calibratedHumidity = measurement.humidity
+					jsonString=buildJSONString(measurement)
+					myMQTTPublish(MQTTTopic,jsonString)
+					#MQTTClient.publish(MQTTTopic,jsonString,1)
 
 
 		except Exception as e:
@@ -310,6 +332,8 @@ def MQTTOnDisconnect(client, userdata,rc):
 # Main loop --------
 parser=argparse.ArgumentParser(allow_abbrev=False)
 parser.add_argument("--device","-d", help="Set the device MAC-Address in format AA:BB:CC:DD:EE:FF",metavar='AA:BB:CC:DD:EE:FF')
+parser.add_argument("--json", "-j", help="Output json result")
+parser.add_argument("--influxraw", "-ir", help="Output influxdb result")
 parser.add_argument("--battery","-b", help="Get estimated battery level, in ATC-Mode: Get battery level from device", metavar='', type=int, nargs='?', const=1)
 parser.add_argument("--count","-c", help="Read/Receive N measurements and then exit script", metavar='N', type=int)
 parser.add_argument("--interface","-i", help="Specifiy the interface number to use, e.g. 1 for hci1", metavar='N', type=int, default=0)
@@ -454,7 +478,7 @@ if args.device:
 				# else:
 					# print("bluepy-helper couldn't be determined, killing not allowed")
 						
-				print("Trying to connect to " + adress)
+				# print("Trying to connect to " + adress)
 				p=connect()
 				# logging.debug("Own PID: "  + str(pid))
 				# pstree=os.popen("pstree -p " + str(pid)).read() #we want to kill only bluepy from our own process tree, because other python scripts have there own bluepy-helper process
@@ -480,7 +504,8 @@ if args.device:
 				
 				cnt += 1
 				if args.count is not None and cnt >= args.count:
-					print(str(args.count) + " measurements collected. Exiting in a moment.")
+					if args.json is None and args.influxraw is None:
+						print(str(args.count) + " measurements collected. Exiting in a moment.")
 					p.disconnect()
 					time.sleep(5)
 					#It seems that sometimes bluepy-helper remains and thus prevents a reconnection, so we try killing our own bluepy-helper
@@ -503,7 +528,11 @@ if args.device:
 				unconnectedTime=int(time.time())
 				connected=False
 			if args.unreachable_count != 0 and connectionLostCounter >= args.unreachable_count:
-				print("Maximum numbers of unsuccessful connections reaches, exiting")
+				if args.json is not None:
+					print('{"error": 404, "message": "Maximum numbers of unsuccessful connections reaches, exiting"}')
+				else:
+					print("Maximum numbers of unsuccessful connections reaches, exiting")
+				
 				os._exit(0)
 			time.sleep(1)
 			logging.debug(e)
